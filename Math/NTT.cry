@@ -1,0 +1,550 @@
+/* Number Theoretic Transform */
+
+module Math::NTT where
+
+import Math::Ring
+import Math::Polynomial
+
+/**
+The type of a Number Theoretic Transform of size `n`. The first
+argument is the `n`th root of unity.
+*/
+type NTT n a = a -> [n]a -> [n]a
+
+/**
+Number Theoretic Transform. The argument `w` must be a primitive `n`th
+root of unity in the ring `R`.
+*/
+naive_ntt : {n, a} (fin n) => RING a -> NTT n a
+naive_ntt R w xs = map (polyeval R (reverse xs)) ws
+  where ws = take`{n} (iterate (R.mul w) R.one)
+
+/**
+Fast Fourier Transform of size 2, also known as a radix-2 butterfly.
+
+The root of unity is fixed as -1.
+*/
+fft2 : {a} RING a -> [2]a -> [2]a
+fft2 R [x0, x1] = [y0, y1]
+  where
+    y0 = R.add x0 x1
+    y1 = R.sub x0 x1
+
+/**
+Fast Fourier Transform of size 2, also known as a radix-2 butterfly.
+*/
+ntt2 : {a} RING a -> NTT 2 a
+ntt2 R w [x0, x1] = [y0, y1]
+  where
+    y0 = R.add x0 x1
+    y1 = R.add x0 (R.mul w x1)
+
+/**
+Fast Fourier Transform of size 3, also known as a radix-3 butterfly.
+*/
+ntt3 : {a} RING a -> NTT 3 a
+ntt3 R w [x0, x1, x2] = [y0, y1, y2]
+  where
+    t = R.mul w (R.sub x1 x2)
+    y0 = R.add (R.add x0 x1) x2
+    y1 = R.add (R.sub x0 x2) t
+    y2 = R.sub (R.sub x0 x1) t
+
+/**
+Fast Fourier Transform of size 4, also known as a radix-4 butterfly.
+*/
+ntt4 : {a} RING a -> NTT 4 a
+ntt4 R w [x0, x1, x2, x3] = [z0, z1, z2, z3]
+  where
+    y0 = R.add x0 x2
+    y1 = R.add x1 x3
+    y2 = R.sub x0 x2
+    y3 = R.mul w (R.sub x1 x3)
+    z0 = R.add y0 y1
+    z1 = R.add y2 y3
+    z2 = R.sub y0 y1
+    z3 = R.sub y2 y3
+
+/**
+Radix-2 decimation-in-time FFT algorithm.
+
+Given a function for computing an FFT of size n, it computes an FFT of
+size 2*n.
+
+Decimation in time starts by computing two size-n NTTs on the even and
+odd elements of the input. After multiplying by twiddle factors, it
+then finishes by combining the results pointwise with size-2 NTTs.
+*/
+radix2_dit : {n, a} (fin n) => RING a -> NTT n a -> NTT (2*n) a
+radix2_dit R fn w xs =
+  join (transpose (map (fft2 R) (transpose [es, zipWith R.mul twiddles os])))
+  where
+    [es, os] = map (fn w2) (transpose (split xs))
+    twiddles = take`{n} (iterate (R.mul w) R.one)
+    w2 = R.mul w w
+
+/**
+Radix-2 decimation-in-frequency FFT algorithm.
+
+Given a function for computing an FFT of size n, it computes an FFT of
+size 2*n.
+
+Decimation in frequency starts by computing size-2 NTTs on pairs of
+elements from the first and second halves of the input. Then it
+multiplies by twiddle factors, and finally computes size-n NTTs on the
+result.
+*/
+radix2_dif : {n, a} (fin n) => RING a -> NTT n a -> NTT (2*n) a
+radix2_dif R fn w xs =
+  join (transpose [fn w2 ys0, fn w2 ys1])
+  where
+    twiddles = take`{n} (iterate (R.mul w) R.one)
+    w2 = R.mul w w
+    [xs0, xs1] = split xs
+    ys0 = zipWith R.add xs0 xs1
+    ys1 = zipWith R.mul twiddles (zipWith R.sub xs0 xs1)
+
+/**
+Number Theoretic Transform of a composite size `m * n`, using
+the Cooley-Tukey FFT algorithm.
+We perform `m` NTTs of size `n`, and then `n` NTTs of size `m`.
+*/
+composite_ntt :
+  {m, n, a} (fin m, fin n) =>
+  RING a -> NTT m a -> NTT n a -> NTT (m * n) a
+composite_ntt R fm fn w xs =
+  join (transpose (map (fn wm) zs))
+  where
+    ws : [inf]a
+    ws = iterate (R.mul w) R.one
+
+    wn : a
+    wn = head (drop`{n} ws)
+
+    wm : a
+    wm = head (drop`{m} ws)
+
+    twiddles : [m][n]a
+    twiddles = [ take`{n} (iterate (R.mul wi) R.one) | wi <- take`{m} ws ]
+
+    ys : [m][n]a
+    ys = transpose (map (fm wn) (transpose (split xs)))
+
+    zs : [m][n]a
+    zs = zipWith (zipWith R.mul) twiddles ys
+
+////////////////////////////////////////////////////////////////////////////////
+// Prime-factor FFT algorithm
+// See https://en.wikipedia.org/wiki/Prime-factor_FFT_algorithm
+
+/**
+Number Theoretic Transform of a composite size `m * n`, using
+the prime-factor FFT algorithm. The factors `m` and `n` must be
+coprime.
+
+We perform `m` NTTs of size `n`, and then `n` NTTs of size `m`.
+*/
+pfa_ntt :
+  {m, n, a} (fin m, fin n) =>
+  RING a -> NTT m a -> NTT n a -> NTT (m * n) a
+pfa_ntt R fm fn w xs @ (k : Integer) = zs @ (k % `n) @ (k % `m)
+  where
+    wm : a
+    wm = ipowR R w `m
+    wn : a
+    wn = ipowR R w `n
+    ys : [m][n]a
+    ys @ (i : Integer) @ (j : Integer) = xs @ ((i * `n + j * `m) % `(m*n))
+    zs : [n][m]a
+    zs = map (fm wn) (transpose (map (fn wm) ys))
+
+////////////////////////////////////////////////////////////////////////////////
+// Modified Prime-factor FFT algorithm
+// This variant takes input and output in rectangular CRT ordering
+
+modified_pfa_ntt :
+  {m, n, i, j, a} (fin m, fin n, fin i, fin j, m >= 1, n >= 1, m * i % n == 1, n * j % m == 1) =>
+  RING a -> NTT m a -> NTT n a -> a -> [m][n]a -> [m][n]a
+modified_pfa_ntt R fm fn w xss = transpose (map (fm wnj) (transpose (map (fn wmi) xss)))
+  where
+    wmi = ipowR R w `(m * i)
+    wnj = ipowR R w `(n * j)
+
+from_crt : {m, n, a} (fin m, fin n) => [m][n]a -> [m * n]a
+from_crt xs @ (i : Integer) = xs @ (i % `m) @ (i % `n)
+
+modified_pfa_ntt_correct :
+  {m, n, i, j, a} (fin m, fin n, fin i, fin j, m >= 1, n >= 1, m * i % n == 1, n * j % m == 1, Eq a) =>
+  RING a -> NTT m a -> NTT n a -> a -> [m][n]a -> Bit
+modified_pfa_ntt_correct R fm fn w xss =
+  from_crt (modified_pfa_ntt`{m,n,i,j} R fm fn w xss) == pfa_ntt R fm fn w (from_crt xss)
+
+property modified_pfa_ntt_correct_12 =
+  modified_pfa_ntt_correct`{3, 4, 3, 1} R (naive_ntt R) (naive_ntt R) w_12
+  where R = theRING`{Z 13}
+
+property modified_pfa_ntt_correct_15 =
+  modified_pfa_ntt_correct`{3, 5, 2, 2} R (naive_ntt R) (naive_ntt R) w_15
+  where R = theRING`{Z 31}
+
+property modified_pfa_ntt_correct_91 =
+  modified_pfa_ntt_correct`{7, 13, 2, 6} R (naive_ntt R) (naive_ntt R) w_91
+  where R = theRING`{Z 547}
+
+////////////////////////////////////////////////////////////////////////////////
+// Bluestein FFT Algorithm
+
+/**
+`bluestein_ntt R u v xs` should compute `naive_ntt R w xs` if `u` is a
+square root of `w` and `v` is the multiplicative inverse of `u`.
+*/
+bluestein_ntt : {n, a} (fin n, n >= 1) => RING a -> a -> a -> [n]a -> [n]a
+bluestein_ntt R u v xs =
+  zipWith R.mul us (take`{n, n-1} (drop`{n-1} (polymul R uxs vs2)))
+  where
+    us = [ ipowR R u (i*i) | i <- [0..n-1] ]
+    vs = [ ipowR R v (i*i) | i <- [0..n-1] ]
+    uxs = zipWith R.mul us xs
+    vs2 = reverse (tail vs) # vs
+
+////////////////////////////////////////////////////////////////////////////////
+// Cyclic convolution
+
+cyclic_convolution : {n, a} (fin n, n >= 1) => RING a -> [n]a -> [n]a -> [n]a
+cyclic_convolution R xs ys @ (i : Integer) =
+  foldl R.add R.zero [ R.mul (xs @ j) (ys @ ((i - j) % `n)) | j <- [0..n-1] ]
+
+negacyclic_convolution : {n, a} (fin n, n >= 1) => RING a -> [n]a -> [n]a -> [n]a
+negacyclic_convolution R xs ys @ (i : Integer) =
+  foldl R.add R.zero [ R.mul (xs @ j) (zs @ (`n + i - j)) | j <- [0..n-1] ]
+  where zs = map R.neg ys # ys
+
+cyclic_convolution2 : {n, a} (fin n, n >= 1) => RING a -> [2*n]a -> [2*n]a -> [2*n]a
+cyclic_convolution2 R (xs0 # xs1) (ys0 # ys1) =
+  zipWith R.add zs0 zs1 # zipWith R.sub zs0 zs1
+  where
+    zs0 = cyclic_convolution`{n} R (zipWith R.add xs0 xs1) (zipWith R.add ys0 ys1)
+    zs1 = negacyclic_convolution`{n} R (zipWith R.sub xs0 xs1) (zipWith R.sub ys0 ys1)
+
+negacyclic_convolution2 : {n, a} (fin n, n >= 1) => RING a -> [2*n]a -> [2*n]a -> [2*n]a
+negacyclic_convolution2 R (xs0 # xs1) (ys0 # ys1) =
+  zipWith R.add zs0 zs1 # zipWith R.sub zs0 zs1
+  where
+    zs0 = negacyclic_convolution`{n} R (zipWith R.add xs0 xs1) (zipWith R.sub ys0 ys1)
+    zs1 = negacyclic_convolution`{n} R (zipWith R.sub xs0 xs1) (zipWith R.add ys0 ys1)
+
+cyclic_convolution2_correct : {n, a} (fin n, n >= 1, Eq a) => RING a -> [2*n]a -> [2*n]a -> Bit
+cyclic_convolution2_correct R xs ys =
+  cyclic_convolution2 R xs ys == zipWith R.add zs zs
+  where zs = cyclic_convolution R xs ys
+
+/** The ring R[X]/(X^n - 1), where multiplication is cyclic convolution. */
+convolutionRING : {n, a} (fin n, n >= 1) => RING a -> RING ([n]a)
+convolutionRING R =
+  { zero = repeat R.zero
+  , one = [R.one] # repeat R.zero
+  , int n = [R.int n] # repeat R.zero
+  , add = zipWith R.add
+  , neg = map R.neg
+  , sub = zipWith R.sub
+  , mul = cyclic_convolution R
+  }
+
+isRING_convolutionRING : {n, a} (fin n, n >= 1, Eq a) => RING a -> [n]a -> [n]a -> [n]a -> Bit
+isRING_convolutionRING R = isRING (convolutionRING R)
+
+/** The ring R[X]/(X^n + 1), where multiplication is negacyclic convolution. */
+negacyclicRING : {n, a} (fin n, n >= 1) => RING a -> RING ([n]a)
+negacyclicRING R =
+  { zero = repeat R.zero
+  , one = [R.one] # repeat R.zero
+  , int n = [R.int n] # repeat R.zero
+  , add = zipWith R.add
+  , neg = map R.neg
+  , sub = zipWith R.sub
+  , mul = negacyclic_convolution R
+  }
+
+isRING_negacyclicRING : {n, a} (fin n, n >= 1, Eq a) => RING a -> [n]a -> [n]a -> [n]a -> Bit
+isRING_negacyclicRING R = isRING (negacyclicRING R)
+
+/** NTT is a ring homomorphism from the cyclic convolution ring. */
+isRINGHom_naive_ntt : {n, a} (fin n, n >= 1, Eq a) => RING a -> a -> [n]a -> [n]a -> Bit
+isRINGHom_naive_ntt R w =
+  isRINGHom (convolutionRING R) (pointwiseRING R) (naive_ntt`{n} R w)
+
+/** Negacyclic NTT is a ring homomorphism from the negacyclic convolution ring. */
+isRINGHom_naive_negacyclic_ntt : {n, a} (fin n, n >= 1, Eq a) => RING a -> a -> [n]a -> [n]a -> Bit
+isRINGHom_naive_negacyclic_ntt R w =
+  isRINGHom (negacyclicRING R) (pointwiseRING R) (naive_negacyclic_ntt`{n} R w)
+
+////////////////////////////////////////////////////////////////////////////////
+// Rader's FFT Algorithm
+
+rader7 : {a} RING a -> NTT 7 a
+rader7 R w [x0,x1,x2,x3,x4,x5,x6] = [y0,y1,y2,y3,y4,y5,y6]
+  where
+    [w1,w2,w3,w4,w5,w6] = take (iterate (R.mul w) w)
+    y0 = foldl R.add R.zero [x0,x1,x2,x3,x4,x5,x6]
+    [y1,y5,y4,y6,y2,y3] =
+      map (R.add x0) (cyclic_convolution R [x1,x3,x2,x6,x4,x5] [w1,w5,w4,w6,w2,w3])
+
+rader7a : {a} RING a -> NTT 7 a
+rader7a R u [y0,y1,y2,y3,y4,y5,y6] = [z0,z1,z2,z3,z4,z5,z6]
+  where
+    [u1,u2,u3,u4,u5,u6] = take (iterate (R.mul u) u)
+    z0 = foldl R.add R.zero [y0,y1,y2,y3,y4,y5,y6]
+    [z1,z3,z2,z6,z4,z5] =
+      map (R.add y0) (cyclic_convolution R [y1,y5,y4,y6,y2,y3] [u1,u3,u2,u6,u4,u5])
+
+rader7_combined R u w xs = rader7a R u (rader7 R w xs)
+
+////////////////////////////////////////////////////////////////////////////////
+// Negacyclic NTT
+
+all_powers : {n, a} (fin n) => RING a -> a -> [n]a
+all_powers R w = take`{n} (iterate (R.mul w) R.one)
+
+odd_powers : {n, a} (fin n) => RING a -> a -> [n]a
+odd_powers R w = take`{n} (iterate (R.mul (R.mul w w)) w)
+
+/**
+Negacyclic Number Theoretic Transform.
+
+Evaluate the given polynomial at the first n odd powers of w, which
+should be a root of unity of order 2n.
+*/
+naive_negacyclic_ntt : {n, a} (fin n) => RING a -> NTT n a
+naive_negacyclic_ntt R w xs = map (polyeval R (reverse xs)) (odd_powers R w)
+
+/**
+Inverse Negacyclic Number Theoretic Transform.
+*/
+naive_inverse_negacyclic_ntt : {n, a} (fin n) => RING a -> NTT n a
+naive_inverse_negacyclic_ntt R w xs =
+  [ foldl R.add R.zero (zipWith R.mul xs (odd_powers R wi))
+  | wi <- all_powers R w ]
+
+/**
+Negacyclic NTT is equivalent to NTT after pre-multiplication with
+sequence of powers.
+*/
+naive_negacyclic_ntt_is_naive_ntt : {n, a} (fin n, Eq a) => RING a -> a -> [n]a -> Bit
+naive_negacyclic_ntt_is_naive_ntt R w xs =
+  naive_negacyclic_ntt R w xs == naive_ntt R (R.mul w w) (zipWith R.mul xs ws)
+  where ws = all_powers R w
+
+/**
+Negacyclic NTT is equivalent to NTT followed by post-multiplication
+with sequence of powers.
+*/
+naive_inverse_negacyclic_ntt_is_naive_ntt : {n, a} (fin n, Eq a) => RING a -> a -> [n]a -> Bit
+naive_inverse_negacyclic_ntt_is_naive_ntt R w xs =
+  naive_inverse_negacyclic_ntt R w xs ==
+  zipWith R.mul (all_powers R w) (naive_ntt R (R.mul w w) xs)
+
+/**
+Negacyclic NTT followed by inverse negacyclic NTT is equivalent to
+scalar multiplication by `n`.
+*/
+naive_inverse_negacyclic_ntt_correct :
+  {n, a} (fin n, Eq a) => RING a -> a -> a -> [n]a -> Bit
+naive_inverse_negacyclic_ntt_correct R w w' xs =
+  naive_inverse_negacyclic_ntt R w' (naive_negacyclic_ntt R w xs) == map (R.mul (R.int `n)) xs
+
+property naive_negacyclic_ntt_is_naive_ntt_4 =
+  naive_negacyclic_ntt_is_naive_ntt`{2} theRING w_4
+
+property naive_negacyclic_ntt_is_naive_ntt_6 =
+  naive_negacyclic_ntt_is_naive_ntt`{3} theRING w_6
+
+property naive_negacyclic_ntt_is_naive_ntt_8 =
+  naive_negacyclic_ntt_is_naive_ntt`{4} theRING w_8
+
+property naive_negacyclic_ntt_is_naive_ntt_12 =
+  naive_negacyclic_ntt_is_naive_ntt`{6} theRING w_12
+
+property naive_negacyclic_ntt_is_naive_ntt_14 =
+  naive_negacyclic_ntt_is_naive_ntt`{7} theRING w_14
+
+property naive_negacyclic_ntt_is_naive_ntt_16 =
+  naive_negacyclic_ntt_is_naive_ntt`{8} theRING w_16
+
+property naive_negacyclic_ntt_is_naive_ntt_32 =
+  naive_negacyclic_ntt_is_naive_ntt`{16} theRING w_32
+
+property naive_inverse_negacyclic_ntt_is_naive_ntt_4 =
+  naive_inverse_negacyclic_ntt_is_naive_ntt`{2} theRING w_4
+
+property naive_inverse_negacyclic_ntt_is_naive_ntt_6 =
+  naive_inverse_negacyclic_ntt_is_naive_ntt`{3} theRING w_6
+
+property naive_inverse_negacyclic_ntt_is_naive_ntt_8 =
+  naive_inverse_negacyclic_ntt_is_naive_ntt`{4} theRING w_8
+
+property naive_inverse_negacyclic_ntt_is_naive_ntt_12 =
+  naive_inverse_negacyclic_ntt_is_naive_ntt`{6} theRING w_12
+
+property naive_inverse_negacyclic_ntt_is_naive_ntt_14 =
+  naive_inverse_negacyclic_ntt_is_naive_ntt`{7} theRING w_14
+
+property naive_inverse_negacyclic_ntt_is_naive_ntt_16 =
+  naive_inverse_negacyclic_ntt_is_naive_ntt`{8} theRING w_16
+
+property naive_inverse_negacyclic_ntt_is_naive_ntt_32 =
+  naive_inverse_negacyclic_ntt_is_naive_ntt`{16} theRING w_32
+
+property naive_inverse_negacyclic_ntt_correct_7 =
+  naive_inverse_negacyclic_ntt_correct`{7} theRING w_14 (recip w_14)
+
+property naive_inverse_negacyclic_ntt_correct_8 =
+  naive_inverse_negacyclic_ntt_correct`{8} theRING w_16 (recip w_16)
+
+property naive_inverse_negacyclic_ntt_correct_16 =
+  naive_inverse_negacyclic_ntt_correct`{16} theRING w_32 (recip w_32)
+
+////////////////////////////////////////////////////////////////////////////////
+// Nth Roots of Unity
+
+/** A primitive 2nd root of unity. */
+w_2 : Z 3
+w_2 = 2
+
+/** A primitive 3rd root of unity. */
+w_3 : Z 7
+w_3 = 2
+
+/** A primitive 4th root of unity. */
+w_4 : Z 5
+w_4 = 2
+
+/** A primitive 6th root of unity. */
+w_6 : Z 7
+w_6 = 3
+
+/** A primitive 7th root of unity. */
+w_7 : Z 29
+w_7 = 7
+
+/** A primitive 8th root of unity. */
+w_8 : Z 17
+w_8 = 2
+
+/** A primitive 9th root of unity. */
+w_9 : Z 19
+w_9 = 4
+
+/** A primitive 12th root of unity. */
+w_12 : Z 13
+w_12 = 2
+
+/** A primitive 14th root of unity. */
+w_14 : Z 29
+w_14 = 4
+
+/** A primitive 15th root of unity. */
+w_15 : Z 31
+w_15 = 7
+
+/** A primitive 16th root of unity. */
+w_16 : Z 17
+w_16 = 3
+
+/** A primitive 32nd root of unity. */
+w_32 : Z 97
+w_32 = 19
+
+/** A primitive 64th root of unity. */
+w_64 : Z 193
+w_64 = 11
+
+/** A primitive 128th root of unity. */
+w_128 : Z 257
+w_128 = 9
+
+/** A primitive 256th root of unity. */
+w_256 : Z 257
+w_256 = 3
+
+/** A primitive 512th root of unity. */
+w_512 : Z 7681
+w_512 = 62
+
+/** A primitive 91st root of unity. */
+w_91 : Z 547
+w_91 = 10
+
+////////////////////////////////////////////////////////////////////////////////
+// Properties
+
+property fft2_correct =
+  fft2 R === naive_ntt`{2} R w_2
+  where R = theRING`{Z 3}
+
+property ntt3_correct =
+  ntt3 R w_3 === naive_ntt`{3} R w_3
+  where R = theRING
+
+property ntt4_correct =
+  ntt4 R w_4 === naive_ntt`{4} R w_4
+  where R = theRING
+
+property radix2_dit_ntt2 =
+  radix2_dit R (ntt2 R) w_4 === naive_ntt R w_4
+  where R = theRING`{Z 5}
+
+property radix2_dit_3 =
+  radix2_dit R (naive_ntt`{3} R) w_6 === naive_ntt`{6} R w_6
+  where R = theRING`{Z 7}
+
+property radix2_dif_3 =
+  radix2_dif R (naive_ntt`{3} R) w_6 === naive_ntt`{6} R w_6
+  where R = theRING`{Z 7}
+
+property radix2_dit_7 =
+  radix2_dit R (naive_ntt`{7} R) w_14 === naive_ntt`{14} R w_14
+  where R = theRING
+
+property radix2_dif_7 =
+  radix2_dif R (naive_ntt`{7} R) w_14 === naive_ntt`{14} R w_14
+  where R = theRING
+
+property radix2_dit_radix2_dit_3 =
+  radix2_dit R (radix2_dit R (naive_ntt`{3} R)) w_12 === naive_ntt`{12} R w_12
+  where R = theRING`{Z 13}
+
+property composite_ntt_3_3 =
+  composite_ntt R (naive_ntt`{3} R) (naive_ntt`{3} R) w_9 === naive_ntt R w_9
+  where R = theRING`{Z 19}
+
+property composite_ntt_3_5 =
+  composite_ntt R (naive_ntt`{3} R) (naive_ntt`{5} R) w_15 === naive_ntt R w_15
+  where R = theRING`{Z 31}
+
+property pfa_ntt_3_5 =
+  pfa_ntt R (naive_ntt`{3} R) (naive_ntt`{5} R) w_15 === naive_ntt R w_15
+  where R = theRING`{Z 31}
+
+property composite_ntt_7_13 =
+  composite_ntt R (naive_ntt`{7} R) (naive_ntt`{13} R) w_91 === naive_ntt R w_91
+  where R = theRING`{Z 547}
+
+property pfa_ntt_7_13 =
+  pfa_ntt R (naive_ntt`{7} R) (naive_ntt`{13} R) w_91 === naive_ntt R w_91
+  where R = theRING`{Z 547}
+
+property bluestein_ntt_6 =
+  bluestein_ntt R w_12 (recip w_12) === naive_ntt`{6} R (w_12^^2)
+  where R = theRING
+
+property bluestein_ntt_7 =
+  bluestein_ntt R w_14 (recip w_14) === naive_ntt`{7} R (w_14^^2)
+  where R = theRING
+
+property rader7_correct =
+  rader7 R w_7 === naive_ntt R w_7
+  where R = theRING`{Z 29}
+
+property rader7a_correct =
+  rader7a R w_7 === naive_ntt R w_7
+  where R = theRING`{Z 29}
