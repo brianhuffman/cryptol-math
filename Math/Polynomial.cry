@@ -1,0 +1,167 @@
+/*
+Operations on polynomials represented in big-endian form, with the
+leading coefficient on the left and the constant coefficient on the
+right. All operations in this module use an explicit dictionary (as
+opposed to a type class constraint) for the coefficient ring.
+*/
+
+module Math::Polynomial where
+
+import Math::Ring
+
+/**
+Constant polynomial.
+*/
+polyconst : {u, a} (fin u, u >= 1) => RING a -> a -> [u]a
+polyconst R c = repeat R.zero # [c]
+
+/**
+Addition of polynomials.
+*/
+polyadd : {u, a} (fin u) => RING a -> [u]a -> [u]a -> [u]a
+polyadd R x y = zipWith R.add x y
+
+/**
+Negation of a polynomial.
+*/
+polyneg : {u, a} (fin u) => RING a -> [u]a -> [u]a
+polyneg R x = map R.neg x
+
+/**
+Subtraction of polynomials.
+*/
+polysub : {u, a} (fin u) => RING a -> [u]a -> [u]a -> [u]a
+polysub R x y = zipWith R.sub x y
+
+/**
+Scalar multiplication of polynomials.
+*/
+polyscale : {u, a} (fin u) => RING a -> a -> [u]a -> [u]a
+polyscale R c x = map (R.mul c) x
+
+/**
+Multiplication of polynomials.
+*/
+polymul : {u, v, a} (fin u, fin v) => RING a -> [1 + u]a -> [1 + v]a -> [1 + u + v]a
+polymul R x y = map head (take`{v} sums) # last sums
+  where
+    rows : [1 + v][1 + u]a
+    rows = [ [ R.mul xi yi | xi <- x ] | yi <- y ]
+    next : [1 + u]a -> [1 + u]a -> [1 + u]a
+    next acc row = polyadd R (tail acc) (take`{u} row) # drop`{u} row
+    sums : [1 + v][1 + u]a
+    sums = scanl next (head rows) (tail rows)
+
+/**
+Multiplication of a list of polynomials.
+*/
+polyproduct : {u, v, a} (fin u, fin v) => RING a -> [u][1 + v]a -> [1 + u * v]a
+polyproduct R xs =
+  if `u == 0 then polyconst R R.one else polymul R x0 (polyproduct R xs')
+  where
+    x0 = drop`{(1 - min 1 u) * v} (xs @ 0)
+    xs' = drop`{min 1 u} xs
+
+/**
+Polynomial evaluation in the coefficient ring.
+*/
+polyeval : {n, a} (fin n) => RING a -> [n]a -> a -> a
+polyeval R p x = foldl (\y pi -> R.add (R.mul x y) pi) R.zero p
+
+/**
+Reduce a degree-n big-endian polynomial by a monic degree-n modulus,
+decrementing its degree by 1. The leading 1 coefficient on the
+divisor is implied.
+*/
+polyreduce : {u, a} (fin u) => RING a -> [u]a -> [u + 1]a -> [u]a
+polyreduce R modulus z = polysub R (tail z) (polyscale R (head z) modulus)
+
+/**
+Division and remainder of a big-endian polynomial by a monic
+polynomial divisor. The leading 1 coefficient on the divisor is
+implied.
+*/
+polydivmod : {u, v, a} (fin u, fin v) => RING a -> [u + v]a -> [v]a -> ([u]a, [v]a)
+polydivmod R x y = (qs, last rs)
+  where
+    qs : [u]a
+    qs = [ head (r # [c])
+         | r <- take`{u,1} rs
+         | c <- drop`{v,u} x ]
+
+    rs : [u + 1][v]a
+    rs = [ take`{v,u} x ] #
+         [ polyreduce R y (r # [c])
+         | r <- take`{u,1} rs
+         | c <- drop`{v,u} x ]
+
+/**
+Division of a big-endian polynomial by a monic polynomial divisor.
+The leading 1 coefficient on the divisor is implied.
+*/
+polydiv : {u, v, a} (fin u, fin v) => RING a -> [u + v]a -> [v]a -> [u]a
+polydiv R x y = (polydivmod R x y).0
+
+/**
+Remainder of dividing of a big-endian polynomial by a monic polynomial
+divisor. The leading 1 coefficient on the divisor is implied.
+*/
+polymod : {u, v, a} (fin u, fin v) => RING a -> [u + v]a -> [v]a -> [v]a
+polymod R x y = (polydivmod R x y).1
+
+/**
+Modular multiplication of big-endian polynomials with respect to a
+monic polynomial modulus (the first argument). The leading 1
+coefficient on the modulus is implied.
+*/
+polymodmul : {u, a} (fin u, u >= 1) => RING a -> [u]a -> [u]a -> [u]a -> [u]a
+polymodmul R modulus x y = foldl next (head rows) (tail rows)
+  where
+    next : [u]a -> [u]a -> [u]a
+    next acc row = polyadd R (polyreduce R modulus (acc # [R.zero])) row
+
+    rows : [u][u]a
+    rows = [ [ R.mul xi yi | xi <- x ] | yi <- y ]
+
+
+/**
+The ring of (big-endian) polynomials modulo a monic polynomial
+modulus. The leading 1 coefficient on the modulus is implied.
+*/
+polyRING : {n, a} (fin n, n >= 1) => RING a -> [n]a -> RING ([n]a)
+polyRING R modulus =
+  { zero = polyconst R R.zero
+  , one = polyconst R R.one
+  , int n = polyconst R (R.int n)
+  , add = polyadd R
+  , neg = polyneg R
+  , sub = polysub R
+  , mul = polymodmul R modulus
+  }
+
+/*
+NOTE: `polyRING` preserves ring homomorphisms. If `isRINGHom A B f`,
+then `isRINGHom (polyRING A m) (polyRING A (map f m)) (map f)`.
+*/
+
+/**
+The ring of GF2 polynomials modulo a monic polynomial
+modulus. The leading 1 coefficient on the modulus is implied.
+*/
+gf2RING : {n} (fin n, n >= 1) => [n] -> RING [n]
+gf2RING modulus =
+  { zero = 0
+  , one = 1
+  , int n = fromInteger (n % 2)
+  , add = (^)
+  , neg x = x
+  , sub = (^)
+  , mul x y = pmod (pmult x y) (0b1 # modulus)
+  }
+
+/** Compute the product of a list of GF(2) polynomials. */
+pproduct : {u, v} (fin u, fin v) => [u][1 + v] -> [1 + u * v]
+pproduct xs = if `u == 0 then 1 else pmult x0 (pproduct xs')
+  where
+    x0 = drop`{(1 - min 1 u) * v} (xs @ 0)
+    xs' = drop`{min 1 u} xs
