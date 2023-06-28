@@ -1,0 +1,78 @@
+module Math::Ring where
+
+type RING a =
+  { zero : a
+  , one : a
+  , int : Integer -> a
+  , add : a -> a -> a
+  , neg : a -> a
+  , sub : a -> a -> a
+  , mul : a -> a -> a
+  }
+
+/** RING axioms */
+isRING : {a} Eq a => RING a -> a -> a -> a -> Bit
+isRING R x y z =
+  R.add x (R.add y z) == R.add (R.add x y) z
+  /\ R.add x y == R.add y x
+  /\ R.add x R.zero == x
+  /\ R.add x (R.neg x) == R.zero
+  /\ R.mul x (R.mul y z) == R.mul (R.mul x y) z
+  /\ R.mul x (R.add y z) == R.add (R.mul x y) (R.mul x z)
+  /\ R.mul (R.add x y) z == R.add (R.mul x z) (R.mul y z)
+  /\ R.sub x y == R.add x (R.neg y)
+  // TODO: axiom for int
+
+/** RING homomorphism */
+isRINGHom : {a, b} Eq b => RING a -> RING b -> (a -> b) -> a -> a -> Bit
+isRINGHom A B f x y =
+  f (A.add x y) == B.add (f x) (f y)
+  /\ f (A.mul x y) == B.mul (f x) (f y)
+
+theRING : {a} Ring a => RING a
+theRING =
+  { zero = fromInteger 0
+  , one = fromInteger 1
+  , int = fromInteger
+  , add = (+)
+  , neg = negate
+  , sub = (-)
+  , mul = (*)
+  }
+
+BitRING : RING Bit
+BitRING =
+  { zero = False
+  , one = True
+  , int n = n % 2 != 0
+  , add = (^)
+  , neg x = x
+  , sub = (^)
+  , mul = (&&)
+  }
+
+/**
+Exponentiation of a ring element by a bitvector exponent. */
+powR : {a, n} (fin n) => RING a -> a -> [n] -> a
+powR R x e = foldl next R.one e
+  where next a b = if b then R.mul x (R.mul a a) else R.mul a a
+
+/**
+Exponentiation of a ring element by a bitvector exponent. */
+ipowR : {a} RING a -> a -> Integer -> a
+ipowR R x e =
+  if e == 0 then R.one else
+  if e % 2 == 1 then R.mul x (R.mul a a) else R.mul a a
+  where a = ipowR R x (e / 2)
+
+/** Product ring with pointwise addition and multiplication. */
+pointwiseRING : {n, a} RING a -> RING ([n]a)
+pointwiseRING R =
+  { zero = repeat R.zero
+  , one = repeat R.one
+  , int n = repeat (R.int n)
+  , add = zipWith R.add
+  , neg = map R.neg
+  , sub = zipWith R.sub
+  , mul = zipWith R.mul
+  }
